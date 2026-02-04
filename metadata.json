@@ -1,0 +1,5 @@
+{
+  "name": "Copy of AI Honeypot for Scam Detection",
+  "description": "An AI-driven honeypot system that detects and engages with scammers to extract intelligence, simulating a REST API and maintaining a believable human persona.",
+  "requestFramePermissions": []
+}
