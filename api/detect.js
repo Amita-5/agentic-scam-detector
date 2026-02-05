@@ -1,11 +1,14 @@
 import fetch from "node-fetch";
 
 /**
- * In-memory session store (hackathon-safe)
+ * In-memory session state (sufficient for hackathon evaluation)
  */
 const sessionState = {};
 
-async function generateGeminiReply(prompt) {
+/**
+ * Call Gemini safely
+ */
+async function callGemini(prompt) {
   try {
     const response = await fetch(
       "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=" +
@@ -20,29 +23,36 @@ async function generateGeminiReply(prompt) {
     );
 
     const data = await response.json();
-    return data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    return data?.candidates?.[0]?.content?.parts?.[0]?.text || null;
   } catch {
     return null;
   }
 }
 
 export default async function handler(req, res) {
+  /* ------------------ AUTH ------------------ */
   const apiKey = req.headers["x-api-key"];
-
   if (!apiKey) return res.status(401).json({ error: "x-api-key missing" });
   if (apiKey !== "dev-key") return res.status(403).json({ error: "Invalid API key" });
 
-  const { sessionId, message, conversationHistory = [], metadata = {} } = req.body;
+  /* ------------------ INPUT ------------------ */
+  const {
+    sessionId,
+    message,
+    conversationHistory = [],
+    metadata = {}
+  } = req.body;
+
   const text = message?.text;
 
   if (!sessionId || !text) {
     return res.status(200).json({
       status: "success",
-      reply: "Can you explain this message?"
+      reply: "Can you explain what this message is about?"
     });
   }
 
-  // ---------- INIT SESSION ----------
+  /* ------------------ SESSION INIT ------------------ */
   if (!sessionState[sessionId]) {
     sessionState[sessionId] = {
       turns: 0,
@@ -55,38 +65,53 @@ export default async function handler(req, res) {
   const state = sessionState[sessionId];
   state.turns += 1;
 
-  // ---------- SCAM INTELLIGENCE EXTRACTION ----------
+  /* ------------------ INTELLIGENCE EXTRACTION ------------------ */
   const lower = text.toLowerCase();
 
   if (/otp|one time password/.test(lower)) state.requestedData.add("OTP");
-  if (/upi|account number|bank/.test(lower)) state.requestedData.add("Bank Details");
-  if (/link|click/.test(lower)) state.scamIndicators.add("Phishing Link");
-  if (/blocked|suspended|urgent|hours/.test(lower)) state.scamIndicators.add("Threat / Urgency");
-  if (/won|prize|reward/.test(lower)) state.scamIndicators.add("Lottery Scam");
+  if (/upi|account number|bank|card/.test(lower)) state.requestedData.add("Bank Details");
+  if (/click|link|verify link/.test(lower)) state.scamIndicators.add("Phishing Link");
+  if (/urgent|blocked|suspended|hours|immediately/.test(lower))
+    state.scamIndicators.add("Threat / Urgency");
+  if (/won|prize|reward|lottery/.test(lower)) state.scamIndicators.add("Lottery Scam");
 
-  // ---------- BASE HUMAN REPLY (SAFE FALLBACK) ----------
-  let baseReply;
-  if (state.turns === 1) baseReply = "Why is my account being suspended?";
-  else if (state.turns === 2) baseReply = "What exactly do you need to verify?";
-  else if (state.turns === 3) baseReply = "I haven’t received any official notification.";
-  else baseReply = "Can you share official confirmation for this request?";
+  /* ------------------ GEMINI PROMPT (REAL INTELLIGENCE) ------------------ */
+  const historyText =
+    conversationHistory.length > 0
+      ? conversationHistory.map(m => `${m.sender}: ${m.text}`).join("\n")
+      : "No prior conversation.";
 
-  // ---------- GEMINI REPHRASING (OPTIONAL) ----------
   const geminiPrompt = `
-You are a cautious bank customer.
-Ask ONE short clarification question.
-Do NOT share personal information.
-Do NOT mention scams or security.
-Rephrase naturally:
+You are a real human who received suspicious messages.
+You are NOT an AI.
+You are NOT a security system.
 
-"${baseReply}"
+Rules:
+- Reply like a cautious normal person
+- Ask natural clarification questions
+- Do NOT share OTP, bank info, or personal data
+- Do NOT mention scams, fraud, police, or security
+- Do NOT explain policies or analysis
+- Reply with ONE short message only
+
+Conversation so far:
+${historyText}
+
+Latest message received:
+"${text}"
+
+Your reply:
 `;
 
-  const geminiReply = await generateGeminiReply(geminiPrompt);
-  const reply = geminiReply || baseReply;
+  const geminiReply = await callGemini(geminiPrompt);
 
-  // ---------- FINALIZATION + GUVI CALLBACK ----------
-  if (state.turns >= 4 && !state.finalized) {
+  const reply =
+    geminiReply && typeof geminiReply === "string"
+      ? geminiReply.trim()
+      : "Can you explain what you mean by this?";
+
+  /* ------------------ GUVI FINAL CALLBACK ------------------ */
+  if (!state.finalized && state.turns >= 3) {
     state.finalized = true;
 
     const intelligencePayload = {
@@ -107,11 +132,11 @@ Rephrase naturally:
         body: JSON.stringify(intelligencePayload)
       });
     } catch {
-      // Silent by design
+      // silent by design (no leakage)
     }
   }
 
-  // ---------- FINAL RESPONSE ----------
+  /* ------------------ FINAL RESPONSE ------------------ */
   return res.status(200).json({
     status: "success",
     reply
